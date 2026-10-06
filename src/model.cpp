@@ -143,7 +143,7 @@ static EncodedAudio encode_16k(const ModelLoader& loader,
 
 // Decode one item's encoder output (row-major [d_model, Tout], channels-first)
 // into a transcript. Mirrors the tail of transcribe_16k exactly.
-static std::string decode_enc_out(const ModelLoader& loader,
+static std::string decode_enc_out_impl(const ModelLoader& loader,
                                   const std::vector<float>& enc_out,
                                   int d_model, int Tout, bool use_tdt) {
     const ParakeetConfig& cfg = loader.config();
@@ -171,6 +171,20 @@ static std::string decode_enc_out(const ModelLoader& loader,
                                               (int)cfg.blank_id);
         return detokenize(loader.tokenizer_pieces(), strip_special_tokens(loader.tokenizer_pieces(), ids));
     }
+}
+
+// The TDT decoder runs ~1k tiny graphs per clip (LSTM + joint per step); waking
+// every encoder thread for each of their ops costs more than it saves. Decode on
+// PARAKEET_DEC_THREADS threads (default 1), then restore the encoder's count.
+static std::string decode_enc_out(const ModelLoader& loader, const std::vector<float>& enc,
+                                  int d_model, int T, bool use_tdt) {
+    pk::Backend& be = pk::global_backend();
+    const int prev = be.n_threads();
+    const char* e = std::getenv("PARAKEET_DEC_THREADS");
+    const int dec = e ? std::atoi(e) : 1;
+    struct Restore { pk::Backend& b; int n; ~Restore() { b.set_n_threads(n); } } restore{be, prev};
+    if (dec > 0 && dec < prev) be.set_n_threads(dec);
+    return decode_enc_out_impl(loader, enc, d_model, T, use_tdt);
 }
 
 std::string Model::transcribe_16k(const std::vector<float>& pcm16k,

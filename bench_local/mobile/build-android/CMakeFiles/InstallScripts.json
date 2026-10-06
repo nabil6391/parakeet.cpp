@@ -1,0 +1,11 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/nabilhossain/StudioProjects/parakeet.cpp/bench_local/mobile/build-android/cmake_install.cmake",
+		"/Users/nabilhossain/StudioProjects/parakeet.cpp/bench_local/mobile/build-android/parakeet/cmake_install.cmake",
+		"/Users/nabilhossain/StudioProjects/parakeet.cpp/bench_local/mobile/build-android/parakeet/third_party/ggml/cmake_install.cmake",
+		"/Users/nabilhossain/StudioProjects/parakeet.cpp/bench_local/mobile/build-android/parakeet/third_party/ggml/src/cmake_install.cmake",
+		"/Users/nabilhossain/StudioProjects/parakeet.cpp/bench_local/mobile/build-android/parakeet/third_party/ggml/src/ggml-cpu/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

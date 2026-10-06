@@ -9,6 +9,7 @@
 #include <vector>
 #include <utility>
 #include <stdexcept>
+#include <cstdlib>
 namespace pk {
 
 int PromptCfg::resolve_index_or_throw(const std::string& target_lang) const {
@@ -64,9 +65,71 @@ ModelLoader::~ModelLoader(){
     // from_ptr buffer (free_buffer == NULL) that does NOT own its memory
     // (ctx_ does); for the device path it OWNS the device buffer. The device
     // upload path releases ctx_ as soon as the upload completes.
+    if(repack_buf_) ggml_backend_buffer_free(repack_buf_);
+    if(repack_ctx_) ggml_free(repack_ctx_);
     if(weights_buf_) ggml_backend_buffer_free(weights_buf_);
     if(device_ctx_) ggml_free(device_ctx_);
     if(gguf_) gguf_free(gguf_); if(ctx_) ggml_free(ctx_);
+}
+// Move eligible TQ2_0 weights into the CPU backend's CPU_REPACK buffer, which
+// re-lays them out at upload for ggml's tiled TQ2_0 GEMM (block_tq2_0x4).
+// PARAKEET_REPACK=0 keeps every weight in the plain zero-copy buffer.
+bool ModelLoader::repack_ternary_weights(ggml_backend_t backend){
+    const char* env = std::getenv("PARAKEET_REPACK");
+    if (env && env[0] == '0') return false;
+    if (!ggml_cpu_has_dotprod()) return false;
+
+    ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+    auto get_extra = (ggml_backend_buffer_type_t * (*)(ggml_backend_dev_t))
+        ggml_backend_reg_get_proc_address(ggml_backend_dev_backend_reg(dev), "ggml_backend_dev_get_extra_bufts");
+    ggml_backend_buffer_type_t repack_buft = nullptr;
+    for (auto* b = get_extra ? get_extra(dev) : nullptr; b && *b; ++b) {
+        if (std::strcmp(ggml_backend_buft_name(*b), "CPU_REPACK") == 0) { repack_buft = *b; break; }
+    }
+    if (!repack_buft) return false;
+
+    std::vector<std::string> names;
+    for (auto& kv : tensors_) {
+        const ggml_tensor* t = kv.second;
+        if ((t->type == GGML_TYPE_TQ2_0 || t->type == GGML_TYPE_TQ1_0) &&
+            ggml_n_dims(t) == 2 && t->ne[1] % 4 == 0 && t->ne[0] % 256 == 0)
+            names.push_back(kv.first);
+    }
+    if (names.empty()) return false;
+
+    struct ggml_init_params ip = { ggml_tensor_overhead() * (names.size() + 8), nullptr, true };
+    repack_ctx_ = ggml_init(ip);
+    std::vector<std::pair<ggml_tensor*, const void*>> ups;
+    for (const auto& n : names) {
+        ggml_tensor* s = tensors_[n];
+        // TQ1_0 (1.69 bpw on disk) runs as TQ2_0: same scale + ternary codes, so the
+        // conversion below is exact; the repack buffer then applies the GEMM layout.
+        ggml_tensor* d = ggml_new_tensor(repack_ctx_, GGML_TYPE_TQ2_0, GGML_MAX_DIMS, s->ne);
+        ggml_set_name(d, n.c_str());
+        ups.emplace_back(d, s->data);
+    }
+    repack_buf_ = ggml_backend_alloc_ctx_tensors_from_buft(repack_ctx_, repack_buft);
+    if (!repack_buf_) { PK_LOG("repack: alloc failed, keeping plain weights"); return false; }
+    std::vector<float>   row_f32;
+    std::vector<uint8_t> tq2;
+    for (auto& pr : ups) {
+        const ggml_tensor* src = tensors_[ggml_get_name(pr.first)];
+        if (src->type == GGML_TYPE_TQ2_0) {
+            ggml_backend_tensor_set(pr.first, pr.second, 0, ggml_nbytes(pr.first));
+            continue;
+        }
+        const int64_t K = src->ne[0], R = ggml_nrows(src);
+        const auto* tq1 = ggml_get_type_traits(GGML_TYPE_TQ1_0);
+        row_f32.resize((size_t) K);
+        tq2.resize(ggml_nbytes(pr.first));
+        for (int64_t r = 0; r < R; ++r) {
+            tq1->to_float((const char*) pr.second + r * src->nb[1], row_f32.data(), K);
+            ggml_quantize_chunk(GGML_TYPE_TQ2_0, row_f32.data(), tq2.data() + r * ggml_row_size(GGML_TYPE_TQ2_0, K), 0, 1, K, nullptr);
+        }
+        ggml_backend_tensor_set(pr.first, tq2.data(), 0, tq2.size());
+    }
+    for (auto& pr : ups) tensors_[ggml_get_name(pr.first)] = pr.first;
+    return true;
 }
 bool ModelLoader::realize_weights(ggml_backend_t backend){
     if(weights_buf_) return true;                       // idempotent
@@ -81,6 +144,10 @@ bool ModelLoader::realize_weights(ggml_backend_t backend){
         // reference the loader tensors DIRECTLY as leaves (the gallocr treats
         // data!=NULL tensors as already-allocated and never copies them;
         // reshapes/views resolve at build time). Eliminates per-call recopy.
+        // With repacked ternary weights the loader copy would be a second ~150 MB
+        // of dead weights, so instead copy the remaining dense tensors (device
+        // path below) and free the loader context.
+        if (repack_ternary_weights(backend)) goto copy_rest;
         void*  base = ggml_get_mem_buffer(ctx_);
         size_t size = ggml_get_mem_size(ctx_);
         weights_buf_ = ggml_backend_cpu_buffer_from_ptr(base, size);
@@ -88,6 +155,7 @@ bool ModelLoader::realize_weights(ggml_backend_t backend){
         for(auto& kv : tensors_) kv.second->buffer = weights_buf_;
         return true;
     }
+copy_rest:
 
     // Device path (CUDA/Metal/Vulkan/...): weights must live in a backend buffer.
     // ctx_ was created no_alloc=false (host-resident data), which
@@ -109,6 +177,7 @@ bool ModelLoader::realize_weights(ggml_backend_t backend){
     std::unordered_map<std::string, ggml_tensor*> devmap; devmap.reserve(n);
     for (auto& kv : tensors_) {
         ggml_tensor* s = kv.second;
+        if (s->buffer) { devmap.emplace(kv.first, s); continue; }   // already repacked
         ggml_tensor* d = ggml_new_tensor(device_ctx_, s->type, GGML_MAX_DIMS, s->ne);
         ggml_set_name(d, kv.first.c_str());
         devmap.emplace(kv.first, d);

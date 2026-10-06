@@ -1,0 +1,12 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/nabilhossain/StudioProjects/parakeet.cpp/bench_local/mobile/build-ios-sim/cmake_install.cmake",
+		"/Users/nabilhossain/StudioProjects/parakeet.cpp/bench_local/mobile/build-ios-sim/parakeet/cmake_install.cmake",
+		"/Users/nabilhossain/StudioProjects/parakeet.cpp/bench_local/mobile/build-ios-sim/parakeet/third_party/ggml/cmake_install.cmake",
+		"/Users/nabilhossain/StudioProjects/parakeet.cpp/bench_local/mobile/build-ios-sim/parakeet/third_party/ggml/src/cmake_install.cmake",
+		"/Users/nabilhossain/StudioProjects/parakeet.cpp/bench_local/mobile/build-ios-sim/parakeet/third_party/ggml/src/ggml-cpu/cmake_install.cmake",
+		"/Users/nabilhossain/StudioProjects/parakeet.cpp/bench_local/mobile/build-ios-sim/parakeet/third_party/ggml/src/ggml-blas/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

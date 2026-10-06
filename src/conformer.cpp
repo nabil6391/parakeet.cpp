@@ -201,31 +201,33 @@ static ggml_tensor* build_conv_module(ggml_context* ctx, const ModelLoader& ml,
         glu = ggml_mul(ctx, glu, tmask);
     }
 
-    // -- depthwise_conv (Conv1d d->d, k=K, groups=d). F32 im2col throughout.
-    ggml_tensor* glu_tc = ggml_cont(ctx, ggml_transpose(ctx, glu)); // [T, C]
+    // -- depthwise_conv (Conv1d d->d, k=K, groups=d).
     ggml_tensor* dww = clone_weight(ctx, ml, pre + "conv.depthwise_conv.weight"); // [K,1,C]
-    ggml_tensor* dw;
-    {
-        ggml_tensor* nb = ggml_reshape_4d(ctx, glu_tc,
-                              glu_tc->ne[0], 1, glu_tc->ne[1], 1); // [T,1,C,1]
-        ggml_tensor* ic;
-        if (conv_causal) {
-            ggml_tensor* nbp = ggml_pad_ext(ctx, nb, /*lp0*/K - 1, /*rp0*/0,
-                                            0, 0, 0, 0, 0, 0); // [T+K-1,1,C,1]
-            ic = ggml_im2col(ctx, dww, nbp, /*s0*/1, /*s1*/0,
-                             /*p0*/0, /*p1*/0, /*d0*/1, /*d1*/0,
-                             /*is_2D*/false, GGML_TYPE_F32);
-        } else {
-            ic = ggml_im2col(ctx, dww, nb, /*s0*/1, /*s1*/0,
-                             /*p0*/pad, /*p1*/0, /*d0*/1, /*d1*/0,
-                             /*is_2D*/false, GGML_TYPE_F32);
-        }
+    ggml_tensor* dwt;
+    if (!conv_causal) {
+        // Direct depthwise conv on the channels-contiguous activation (CWHN): replaces
+        // im2col + a [K x T] x [K x 1] matmul per channel (millions of K-length dot
+        // products) and both transposes. The result is already laid out as [C, T].
+        ggml_tensor* x4 = ggml_permute(ctx, ggml_reshape_4d(ctx, glu, D, T, 1, 1),
+                                       2, 0, 1, 3);                         // ne [T,1,C,1], C contiguous
+        ggml_tensor* kct = ggml_cont(ctx, ggml_transpose(ctx,
+                                       ggml_reshape_2d(ctx, dww, K, D)));   // [C, K]
+        ggml_tensor* k4 = ggml_permute(ctx, ggml_reshape_4d(ctx, kct, D, 1, K, 1),
+                                       3, 2, 0, 1);                         // ne [K,1,1,C], C contiguous
+        ggml_tensor* y = ggml_conv_2d_dw_direct(ctx, k4, x4, /*s0*/1, /*s1*/1,
+                                                /*p0*/pad, /*p1*/0, /*d0*/1, /*d1*/1); // memory [T][C]
+        dwt = ggml_view_2d(ctx, y, D, T, (size_t) D * ggml_element_size(y), 0); // [C, T]
+    } else {
+        ggml_tensor* glu_tc = ggml_cont(ctx, ggml_transpose(ctx, glu)); // [T, C]
+        ggml_tensor* nb = ggml_reshape_4d(ctx, glu_tc, glu_tc->ne[0], 1, glu_tc->ne[1], 1); // [T,1,C,1]
+        ggml_tensor* nbp = ggml_pad_ext(ctx, nb, /*lp0*/K - 1, /*rp0*/0, 0, 0, 0, 0, 0, 0); // [T+K-1,1,C,1]
+        ggml_tensor* ic = ggml_im2col(ctx, dww, nbp, /*s0*/1, /*s1*/0, /*p0*/0, /*p1*/0,
+                                      /*d0*/1, /*d1*/0, /*is_2D*/false, GGML_TYPE_F32);
         ggml_tensor* r2 = ggml_mul_mat(ctx, ic, dww);
-        dw = ggml_reshape_3d(ctx, r2, r2->ne[0], r2->ne[2], 1); // [OW=T, C, 1]
+        ggml_tensor* dw = ggml_reshape_2d(ctx, r2, T, D);                  // [T, C]
+        dwt = ggml_cont(ctx, ggml_transpose(ctx, dw));                     // [C, T]
     }
-    dw = ggml_reshape_2d(ctx, dw, T, D);                  // [T, C]
     ggml_tensor* dwb = clone_weight_opt(ctx, ml, pre + "conv.depthwise_conv.bias"); // [C]
-    ggml_tensor* dwt = ggml_cont(ctx, ggml_transpose(ctx, dw)); // [C, T]
     if (dwb) dwt = ggml_add(ctx, dwt, dwb);               // broadcast [C] over T
 
     // -- norm (between depthwise conv and SiLU).

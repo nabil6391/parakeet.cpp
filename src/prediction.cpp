@@ -10,6 +10,19 @@
 
 namespace pk {
 
+// Copy the embedding table to the host as f32 (the GGUF may store it as f16).
+static void fetch_embedding_f32(const ggml_tensor* emb, std::vector<float>& out) {
+    if (emb->type == GGML_TYPE_F16) {
+        std::vector<ggml_fp16_t> tmp((size_t)ggml_nelements(emb));
+        ggml_backend_tensor_get(emb, tmp.data(), 0, ggml_nbytes(emb));
+        ggml_fp16_to_fp32_row(tmp.data(), out.data(), (int64_t)tmp.size());
+    } else {
+        assert(emb->type == GGML_TYPE_F32 && "embedding must be f32 or f16");
+        ggml_backend_tensor_get(emb, out.data(), 0, ggml_nbytes(emb));
+    }
+}
+
+
 PredictionNet::PredictionNet(const ModelLoader& ml) : ml_(ml) {
     H_        = (int)ml.config().pred_hidden;
     vocab_p1_ = (int)ml.config().vocab_size + 1;
@@ -57,7 +70,7 @@ void PredictionNet::step(int32_t token_id, bool is_sos,
         ggml_tensor* emb = ml_.tensor("decoder.prediction.embed.weight");
         assert(emb && "missing decoder.prediction.embed.weight");
         embed_host_.resize((size_t)vocab_p1_ * H);
-        ggml_backend_tensor_get(emb, embed_host_.data(), 0, ggml_nbytes(emb));
+        fetch_embedding_f32(emb, embed_host_);
     }
 
     // Layer-0 input: zeros for SOS, else the embedding row for token_id.
@@ -135,7 +148,7 @@ void PredictionNet::step_batch(const std::vector<int32_t>& token_ids,
         ggml_tensor* emb = ml_.tensor("decoder.prediction.embed.weight");
         assert(emb && "missing decoder.prediction.embed.weight");
         embed_host_.resize((size_t)vocab_p1_ * H);
-        ggml_backend_tensor_get(emb, embed_host_.data(), 0, ggml_nbytes(emb));
+        fetch_embedding_f32(emb, embed_host_);
     }
 
     // Layer-0 input [H*N]: zeros for SOS items, else the embedding row.

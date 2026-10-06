@@ -135,6 +135,10 @@ private:
     // device buffer holding the uploaded weights (mirrored into device_ctx_).
     ggml_backend_buffer_t weights_buf_ = nullptr;
     ggml_context* device_ctx_ = nullptr;  // no_alloc mirror ctx for device weights
+    // CPU only: ternary weights moved into the CPU_REPACK buffer (i8mm layout).
+    ggml_context* repack_ctx_ = nullptr;
+    ggml_backend_buffer_t repack_buf_ = nullptr;
+    bool repack_ternary_weights(ggml_backend_t backend);
     std::unordered_map<std::string, ggml_tensor*> tensors_;
 };
 }
