@@ -67,9 +67,6 @@ ggml_tensor* RelPosAttention::build_graph(ggml_context* ctx, ggml_tensor* xt,
         }
         return y;
     };
-    ggml_tensor* q = linear("linear_q.weight", "linear_q.bias", xt); // [D, T]
-    ggml_tensor* k = linear("linear_k.weight", "linear_k.bias", xt); // [D, T]
-    ggml_tensor* v = linear("linear_v.weight", "linear_v.bias", xt); // [D, T]
     ggml_tensor* p = linear("linear_pos.weight", nullptr, pe);       // [D, P]
 
     // ---- split into heads: [D, *] -> [dk, H, *] -> [dk, *, H] ----
@@ -78,10 +75,39 @@ ggml_tensor* RelPosAttention::build_graph(ggml_context* ctx, ggml_tensor* xt,
         t = ggml_cont(ctx, ggml_permute(ctx, t, 0, 2, 1, 3));  // [dk, n, H]
         return t;
     };
-    ggml_tensor* qh = to_heads(q, T);        // [dk, T, H]
-    ggml_tensor* kh = to_heads(k, T);        // [dk, T, H]
-    ggml_tensor* vh = to_heads(v, T);        // [dk, T, H]
+    ggml_tensor *qh, *kh, *vh;
+    if (ml.tensor(pre + "linear_qkv.weight")) {
+        // Fused projection: one [D -> 3D] matmul (q, k, v rows stacked) instead of
+        // three, so the activation is quantized once and the threads sync once.
+        ggml_tensor* qkv = linear("linear_qkv.weight", "linear_qkv.bias", xt); // [3D, T]
+        const size_t es = ggml_element_size(qkv);
+        auto head_view = [&](int idx) {                        // rows [idx*D, idx*D+D)
+            ggml_tensor* t = ggml_view_3d(ctx, qkv, dk, H, T, dk * es, qkv->nb[1],
+                                          (size_t) idx * D * es); // [dk, H, T]
+            return ggml_cont(ctx, ggml_permute(ctx, t, 0, 2, 1, 3)); // [dk, T, H]
+        };
+        qh = head_view(0);
+        kh = head_view(1);
+        vh = head_view(2);
+    } else {
+        qh = to_heads(linear("linear_q.weight", "linear_q.bias", xt), T); // [dk, T, H]
+        kh = to_heads(linear("linear_k.weight", "linear_k.bias", xt), T); // [dk, T, H]
+        vh = to_heads(linear("linear_v.weight", "linear_v.bias", xt), T); // [dk, T, H]
+    }
     ggml_tensor* ph = to_heads(p, pos_len);  // [dk, P, H]
+
+    // The tiled F32 GEMM needs the reduced/row dims in multiples of 4. Pad the key
+    // axis to Tk and the position axis to P4 with zero rows; padded keys get -inf
+    // in the mask (zero attention weight), padded positions are sliced off below.
+    const int Tk = (T + 3) & ~3;
+    const int P4 = (pos_len + 3) & ~3;
+    if (Tk != T) {
+        kh = ggml_pad_ext(ctx, kh, 0, 0, 0, Tk - T, 0, 0, 0, 0); // [dk, Tk, H]
+        vh = ggml_pad_ext(ctx, vh, 0, 0, 0, Tk - T, 0, 0, 0, 0); // [dk, Tk, H]
+    }
+    if (P4 != pos_len) {
+        ph = ggml_pad_ext(ctx, ph, 0, 0, 0, P4 - pos_len, 0, 0, 0, 0); // [dk, P4, H]
+    }
 
     // ---- pos_bias_u/v: ne [dk, H] -> [dk, 1, H] to broadcast over T ----
     ggml_tensor* bu = clone_weight(ctx, ml, pre + "pos_bias_u"); // [dk, H]
@@ -92,10 +118,13 @@ ggml_tensor* RelPosAttention::build_graph(ggml_context* ctx, ggml_tensor* xt,
     ggml_tensor* qv = ggml_add(ctx, qh, bv); // [dk, T, H]
 
     // ---- ac = q_u @ k^T : ggml_mul_mat([dk,T,H],[dk,T,H]) -> [T_k, T_q, H] ----
-    ggml_tensor* ac = ggml_mul_mat(ctx, kh, qu); // [T(key), T(query), H]
+    ggml_tensor* ac = ggml_mul_mat(ctx, kh, qu); // [Tk(key), T(query), H]
 
     // ---- bd = q_v @ p^T -> [P(pos), T(query), H], then rel_shift -> [T,T,H] ----
-    ggml_tensor* bd = ggml_mul_mat(ctx, ph, qv); // [P, T, H]
+    ggml_tensor* bd = ggml_mul_mat(ctx, ph, qv); // [P4, T, H]
+    if (P4 != pos_len) {
+        bd = ggml_cont(ctx, ggml_view_3d(ctx, bd, pos_len, T, H, bd->nb[1], bd->nb[2], 0)); // [P, T, H]
+    }
     bd = ggml_pad_ext(ctx, bd, /*lp0*/1, /*rp0*/0, 0,0, 0,0, 0,0); // [P+1=2T, T, H]
     bd = ggml_reshape_3d(ctx, bd, T, 2 * T, H);                    // [T, 2T, H]
     bd = ggml_view_3d(ctx, bd, T, 2 * T - 1, H,
@@ -106,7 +135,10 @@ ggml_tensor* RelPosAttention::build_graph(ggml_context* ctx, ggml_tensor* xt,
     bd = ggml_cont(ctx, bd);
 
     // ---- scores = ac + bd ; softmax(scores*scale + mask) ----
-    ggml_tensor* scores = ggml_add(ctx, ac, bd); // [T_k, T_q, H]
+    if (Tk != T) {
+        bd = ggml_pad_ext(ctx, bd, 0, Tk - T, 0, 0, 0, 0, 0, 0); // [Tk, T, H]
+    }
+    ggml_tensor* scores = ggml_add(ctx, ac, bd); // [Tk, T_q, H]
 
     // Additive mask [T_k, T_q]: 0 where query qi may attend to key kj, -inf
     // otherwise. (1) pad mask: key kj valid iff kj < valid_len. (2) chunked-
@@ -119,13 +151,14 @@ ggml_tensor* RelPosAttention::build_graph(ggml_context* ctx, ggml_tensor* xt,
     const int chunk_size  = chunked_limited_ ? (att_right_ + 1) : 0;
     const int left_chunks = (chunked_limited_ && chunk_size > 0)
                             ? (att_left_ / chunk_size) : 0;
-    std::vector<float>& mask_host = pool.alloc_f32((size_t)T * T);
+    std::vector<float>& mask_host = pool.alloc_f32((size_t)Tk * T);
     {
         float* md = mask_host.data();
         const float ninf = -INFINITY;
         for (int qi = 0; qi < T; ++qi) {
+            for (int kj = T; kj < Tk; ++kj) md[(size_t)qi * Tk + kj] = ninf; // padded keys
             if (qi >= valid_len) {  // dead (padded) query row: see above
-                for (int kj = 0; kj < T; ++kj) md[(size_t)qi * T + kj] = 0.0f;
+                for (int kj = 0; kj < T; ++kj) md[(size_t)qi * Tk + kj] = 0.0f;
                 continue;
             }
             const int cq = chunked_limited_ ? (qi / chunk_size) : 0;
@@ -142,14 +175,14 @@ ggml_tensor* RelPosAttention::build_graph(ggml_context* ctx, ggml_tensor* xt,
                     const int rel = qi - kj;
                     ok = (rel <= att_left) && (rel >= -att_right);
                 }
-                md[(size_t)qi * T + kj] = ok ? 0.0f : ninf;
+                md[(size_t)qi * Tk + kj] = ok ? 0.0f : ninf;
             }
         }
     }
-    int64_t mask_ne[2] = {T, T};
+    int64_t mask_ne[2] = {Tk, T};
     ggml_tensor* mask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, mask_ne,
                             mask_host.data(), mask_host.size() * sizeof(float));
-    ggml_tensor* attn = ggml_soft_max_ext(ctx, scores, mask, scale, 0.0f); // [T_k, T_q, H]
+    ggml_tensor* attn = ggml_soft_max_ext(ctx, scores, mask, scale, 0.0f); // [Tk, T_q, H]
 
     // ---- context = attn @ v -> [dk, T_q, H] ----
     ggml_tensor* vtk = ggml_cont(ctx, ggml_permute(ctx, vh, 1, 0, 2, 3)); // [T_k, dk, H]

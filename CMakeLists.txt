@@ -47,10 +47,10 @@ endif()
 # submodule so the patched source is compiled in. Idempotent: already-applied
 # patches are silently skipped.
 find_program(BASH_EXECUTABLE bash)
-if(BASH_EXECUTABLE AND EXISTS "${CMAKE_SOURCE_DIR}/scripts/apply_ggml_patches.sh")
+if(BASH_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/scripts/apply_ggml_patches.sh")
   execute_process(
-    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/apply_ggml_patches.sh"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/apply_ggml_patches.sh"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     RESULT_VARIABLE _patch_result
     OUTPUT_VARIABLE _patch_output
     ERROR_VARIABLE  _patch_errors
@@ -76,7 +76,7 @@ add_subdirectory(third_party/ggml)
 # than referenced as a separate archive dependency, so this does not create a
 # link-time cycle between the parakeet and ced targets.
 add_library(dr_wav_impl OBJECT src/dr_wav_impl.cpp)
-target_include_directories(dr_wav_impl PRIVATE ${CMAKE_SOURCE_DIR}/third_party)
+target_include_directories(dr_wav_impl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 set_target_properties(dr_wav_impl PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(PARAKEET_WITH_CED)
@@ -160,7 +160,7 @@ if(PARAKEET_SHARED)
 else()
   add_library(parakeet STATIC ${PARAKEET_SRC})
 endif()
-target_include_directories(parakeet PUBLIC include PRIVATE src ${CMAKE_SOURCE_DIR}/third_party)
+target_include_directories(parakeet PUBLIC include PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 target_compile_definitions(parakeet PUBLIC $<$<CXX_COMPILER_ID:MSVC>:_USE_MATH_DEFINES>)
 target_compile_definitions(parakeet PRIVATE PARAKEET_VERSION="${PARAKEET_VERSION}")
 target_link_libraries(parakeet PUBLIC ggml)

@@ -160,9 +160,9 @@ ggml_tensor* Subsampling::build_graph_batched(ggml_context* ctx,
     x = mask_time(x, vt_stage0);      // zero trailing pad time frames (both paths)
     if (causal) {
         x = pad_causal(x);
-        x = ggml_conv_2d(ctx, w0, x, /*s0*/2, /*s1*/2, /*p0*/0, /*p1*/0, /*d0*/1, /*d1*/1);
+        x = ggml_conv_2d_direct(ctx, w0, x, /*s0*/2, /*s1*/2, /*p0*/0, /*p1*/0, /*d0*/1, /*d1*/1);
     } else {
-        x = ggml_conv_2d(ctx, w0, x, /*s0*/2, /*s1*/2, /*p0*/1, /*p1*/1, /*d0*/1, /*d1*/1);
+        x = ggml_conv_2d_direct(ctx, w0, x, /*s0*/2, /*s1*/2, /*p0*/1, /*p1*/1, /*d0*/1, /*d1*/1);
     }
     // x: ne [OW=F/2, OH=T/2, OC=C, 1]. Add bias broadcast over channels:
     // reshape bias to [1,1,C,1] so it broadcasts across W,H.
@@ -199,7 +199,7 @@ ggml_tensor* Subsampling::build_graph_batched(ggml_context* ctx,
         // Pointwise: weight torch [C,C,1,1] -> ggml ne [1,1,C,C] = [KW,KH,IC,OC].
         ggml_tensor* pww = clone_weight(ctx, ml, s.pw_w);
         ggml_tensor* pwb = clone_weight(ctx, ml, s.pw_b);
-        x = ggml_conv_2d(ctx, pww, x, /*s0*/1, /*s1*/1, /*p0*/0, /*p1*/0, /*d0*/1, /*d1*/1);
+        x = ggml_conv_2d_direct(ctx, pww, x, /*s0*/1, /*s1*/1, /*p0*/0, /*p1*/0, /*d0*/1, /*d1*/1);
         x = ggml_add(ctx, x, ggml_reshape_4d(ctx, pwb, 1, 1, C, 1));
         x = ggml_relu(ctx, x);
     }
@@ -319,9 +319,9 @@ ggml_tensor* Subsampling::build_graph(ggml_context* ctx,
     if (causal) {
         x = mask_time(x, valid_t0);   // zero trailing pad mel frames
         x = pad_causal(x);
-        x = ggml_conv_2d(ctx, w0, x, /*s0*/2, /*s1*/2, /*p0*/0, /*p1*/0, /*d0*/1, /*d1*/1);
+        x = ggml_conv_2d_direct(ctx, w0, x, /*s0*/2, /*s1*/2, /*p0*/0, /*p1*/0, /*d0*/1, /*d1*/1);
     } else {
-        x = ggml_conv_2d(ctx, w0, x, /*s0*/2, /*s1*/2, /*p0*/1, /*p1*/1, /*d0*/1, /*d1*/1);
+        x = ggml_conv_2d_direct(ctx, w0, x, /*s0*/2, /*s1*/2, /*p0*/1, /*p1*/1, /*d0*/1, /*d1*/1);
     }
     // x: ne [OW=F/2, OH=T/2, OC=C, 1]. Add bias broadcast over channels:
     // reshape bias to [1,1,C,1] so it broadcasts across W,H.
@@ -358,7 +358,7 @@ ggml_tensor* Subsampling::build_graph(ggml_context* ctx,
         // Pointwise: weight torch [C,C,1,1] -> ggml ne [1,1,C,C] = [KW,KH,IC,OC].
         ggml_tensor* pww = clone_weight(ctx, ml, s.pw_w);
         ggml_tensor* pwb = clone_weight(ctx, ml, s.pw_b);
-        x = ggml_conv_2d(ctx, pww, x, /*s0*/1, /*s1*/1, /*p0*/0, /*p1*/0, /*d0*/1, /*d1*/1);
+        x = ggml_conv_2d_direct(ctx, pww, x, /*s0*/1, /*s1*/1, /*p0*/0, /*p1*/0, /*d0*/1, /*d1*/1);
         x = ggml_add(ctx, x, ggml_reshape_4d(ctx, pwb, 1, 1, C, 1));
         x = ggml_relu(ctx, x);
     }
